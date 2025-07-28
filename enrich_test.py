@@ -6,8 +6,8 @@ df = pd.read_csv("data/Online Retail.csv")
 
 descriptions = df["Description"].dropna().drop_duplicates().tolist()
 
-# Daha önce enrich edilmişleri oku (cache)
-if os.path.exists("data/enriched_cache.csv"):
+
+if os.path.exists("data/enriched_cache.csv") and os.path.getsize("data/enriched_cache.csv") > 0:
     df_cache = pd.read_csv("data/enriched_cache.csv")
 else:
     df_cache = pd.DataFrame()
@@ -20,10 +20,10 @@ descriptions_to_enrich = [desc for desc in descriptions if desc not in existing_
 
 # Yeni enrich edilenleri topla
 new_rows = []
-for desc in descriptions_to_enrich[:1000]:
+for desc in descriptions_to_enrich[:10]:
     try:
         enriched = enrich_product_description(desc)
-        enriched_dict = enriched.model_dump()
+        enriched_dict = enriched.model_dump() #Pydantic modelinden Python sözlüğüne çevirir !
         enriched_dict["Description"] = desc
         new_rows.append(enriched_dict)
     except Exception as e:
@@ -38,7 +38,7 @@ df_cache.to_csv("data/enriched_cache.csv", index=False)
 
 # Ana dataset ile enrich edilenleri birleştir
 expected_cols = [
-    "Description", "category", "usage_context", "price_segment",
+    "Description", "category", "sub_category","usage_context", "price_segment",
     "material_type", "target_gender", "target_age_group", "tags"
 ]
 df_cache = df_cache[expected_cols]
@@ -46,7 +46,7 @@ df = df.merge(df_cache, on="Description", how="left")
 
 # Description'a göre StockCode'lara da yay
 columns_to_fill = [
-    "category", "usage_context", "price_segment",
+    "category", "sub_category","usage_context", "price_segment",
     "material_type", "target_gender", "target_age_group", "tags"
 ]
 
@@ -56,7 +56,7 @@ for col in columns_to_fill:
 # Bilgilendirme
 print("Toplam satır:", len(df))
 print("Enriched satır sayısı:", df['category'].notna().sum())
-print(df[["Description", "category", "usage_context", "tags"]].dropna().head(10))
+print(df[["Description", "category", "sub_category","usage_context", "tags"]].dropna().head(10))
 
 # Sonuçları CSV'ye kaydet
 df.to_csv("data/enriched_retail.csv", index=False)

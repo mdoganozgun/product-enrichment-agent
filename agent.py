@@ -16,6 +16,7 @@ prompt = ChatPromptTemplate.from_messages([
 Aşağıdaki ürün açıklamasına göre şu alanları çıkar ve yalnızca geçerli bir JSON objesi olarak döndür:
 
 - category: Genel kategori (örnek: home decor, electronics, clothing)
+- sub_category: Genel kategori altındaki spesifik ürün tipi (örnek: lamp, mug, mirror) 
 - usage_context: Nerede / nasıl kullanılır? (örnek: gift, kitchen, office)
 - price_segment: "low", "mid" veya "high"
 - material_type: Ürünün ana malzemesi (örnek: cotton, ceramic, metal)
@@ -63,6 +64,7 @@ def enrich_product_description(description: str) -> ProductEnrichment:
         return ProductEnrichment(
             category=None,
             usage_context=None,
+            sub_category=None,
             price_segment=None,
             material_type=None,
             target_gender=None,
