@@ -1,20 +1,15 @@
-# Standart kütüphaneler en üstte
 import os
 import json
 
-# Üçüncü parti kütüphaneler sonra
 from dotenv import load_dotenv
 from langchain.prompts import ChatPromptTemplate
 from langchain.chains import LLMChain
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-# Projeye özel importlar en altta
 from models import ProductEnrichment
 
-# Ortam değişkenlerini yükle
 load_dotenv()
 
-# Prompt içeriği
 prompt = ChatPromptTemplate.from_messages([
     ("system", "Sen bir ürün zeka asistanısın."),
     ("human", """
@@ -39,7 +34,6 @@ Sadece geçerli bir JSON objesi döndür, başka açıklama yapma.
 """)
 ])
 
-# LLM ayarı (Gemini Pro)
 llm = ChatGoogleGenerativeAI(
     model="models/gemini-2.5-pro",
     google_api_key=os.getenv("GOOGLE_API_KEY"),

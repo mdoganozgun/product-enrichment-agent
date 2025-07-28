@@ -1,36 +1,63 @@
+import os
 import pandas as pd
+from agent import enrich_product_description
 
 df = pd.read_csv("data/Online Retail.csv")
 
-from agent import enrich_product_description
+descriptions = df["Description"].dropna().drop_duplicates().tolist()
 
-# Sadece açıklaması olan ve tekrar edenleri temizle
-sample_descriptions = df["Description"].dropna().drop_duplicates().tolist()[:10]
+# Daha önce enrich edilmişleri oku (cache)
+if os.path.exists("data/enriched_cache.csv"):
+    df_cache = pd.read_csv("data/enriched_cache.csv")
+else:
+    df_cache = pd.DataFrame()
 
-results = []
-for desc in sample_descriptions:
-    enriched = enrich_product_description(desc)
-    enriched_dict = enriched.model_dump()
-    enriched_dict["Description"] = desc  # eşleştirme için description'ı ekle
-    results.append(enriched_dict)
+# Zaten işlenmiş açıklamaları ayıkla
+existing_desc = set(df_cache["Description"]) if not df_cache.empty else set()
 
-# Enriched DataFrame oluştur
-df_enriched = pd.DataFrame(results)
+# Yeni enrich edilecek açıklamaları belirle
+descriptions_to_enrich = [desc for desc in descriptions if desc not in existing_desc]
 
+# Yeni enrich edilenleri topla
+new_rows = []
+for desc in descriptions_to_enrich[:1000]:
+    try:
+        enriched = enrich_product_description(desc)
+        enriched_dict = enriched.model_dump()
+        enriched_dict["Description"] = desc
+        new_rows.append(enriched_dict)
+    except Exception as e:
+        print(f"Enrichment hatası: {desc} => {e}")
 
-# enriched bilgileri Description üzerinden df'ye eşle ve StockCode eşleşen tüm satırlara uygula
-# Önce Description üzerinden birleştir
-df = df.merge(df_enriched, on="Description", how="left")
+df_new = pd.DataFrame(new_rows)
 
-# Her Description’a karşılık gelen StockCode bilgisini yakalayalım
-# Sonra o StockCode’a sahip diğer satırlara da aynı enrichment bilgisini yay
-columns_to_fill = ["category", "usage_context", "price_segment", "material_type", "target_gender", "target_age_group", "tags"]
+# Cache ile birleştir ve kaydet
+df_cache = pd.concat([df_cache, df_new], ignore_index=True)
+df_cache = df_cache.drop_duplicates(subset=["Description"], keep="first")
+df_cache.to_csv("data/enriched_cache.csv", index=False)
+
+# Ana dataset ile enrich edilenleri birleştir
+expected_cols = [
+    "Description", "category", "usage_context", "price_segment",
+    "material_type", "target_gender", "target_age_group", "tags"
+]
+df_cache = df_cache[expected_cols]
+df = df.merge(df_cache, on="Description", how="left")
+
+# Description'a göre StockCode'lara da yay
+columns_to_fill = [
+    "category", "usage_context", "price_segment",
+    "material_type", "target_gender", "target_age_group", "tags"
+]
 
 for col in columns_to_fill:
     df[col] = df.groupby("Description")[col].transform(lambda x: x.ffill().bfill().infer_objects(copy=False))
 
+# Bilgilendirme
 print("Toplam satır:", len(df))
-print("Enriched satır sayısı:", df["category"].notna().sum())
+print("Enriched satır sayısı:", df['category'].notna().sum())
 print(df[["Description", "category", "usage_context", "tags"]].dropna().head(10))
+
+# Sonuçları CSV'ye kaydet
 df.to_csv("data/enriched_retail.csv", index=False)
-print("CSV'ye kaydedildi.")
+print("Zenginleştirilmiş veri CSV'ye kaydedildi.")
