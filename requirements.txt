@@ -5,3 +5,5 @@ pydantic
 langchain-google-genai
 google-generativeai
 pandas
+matplotlib
+scikit-learn

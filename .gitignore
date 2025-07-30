@@ -1,1 +1,58 @@
-/.env
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# VS Code settings
+.vscode/
+
+# PyCharm settings
+.idea/
+
+# Logs
+*.log
+logs/
+
+# Data files
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.db
+*.sqlite3
+data/
+output/
+
+# Model artifacts
+*.pkl
+*.joblib
+models/
+
+# Cache files
+*.cache
+.cache/
+__pycache__/
+
+# Python egg info
+*.egg-info/
+dist/
+build/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Token / API / secrets (if any)
+*.token
+*.key
+*.pem
