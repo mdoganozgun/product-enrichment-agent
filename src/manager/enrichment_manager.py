@@ -1,14 +1,18 @@
 import os
+
+import numpy as np
 import pandas as pd
 import logging
 import traceback
 from agent import enrich_product_description
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder, StandardScaler
+
 
 class EnrichmentManager:
     def __init__(self, data_path, cache_path, log_dir="logs"):
         # Ensure necessary directories exist
         os.makedirs(log_dir, exist_ok=True)
-        os.makedirs("data", exist_ok=True)
+        os.makedirs("../../data", exist_ok=True)
 
         # Define key file paths
         self.data_path = data_path
@@ -167,130 +171,138 @@ class EnrichmentManager:
             self.logger.error("Error during final merge or save")
             self.logger.error(traceback.format_exc())
 
-    def calculate_rfm_features(self, output_path="data/rfm_scores.csv"):
+    def generate_rfm(self, output_path="data/rfm_scores.csv"):
         try:
-            self.logger.info("Calculating enriched RFM features...")
+            self.logger.info("Generating RFM scores...")
 
             df = self.df.copy()
-            df = df.dropna(subset=[
-                "category", "usage_context", "price_segment",
-                "target_gender", "target_age_group"])
-
+            df.dropna(subset=["CustomerID", "InvoiceDate", "InvoiceNo", "Quantity", "UnitPrice"], inplace=True)
             df["InvoiceDate"] = pd.to_datetime(df["InvoiceDate"])
             df["TotalPrice"] = df["Quantity"] * df["UnitPrice"]
+
             reference_date = df["InvoiceDate"].max() + pd.Timedelta(days=1)
 
             rfm = df.groupby("CustomerID").agg({
                 "InvoiceDate": lambda x: (reference_date - x.max()).days,
                 "InvoiceNo": "nunique",
-                "TotalPrice": "sum",
-                "price_segment": lambda x: x.map({"low": 1, "mid": 2, "high": 3}).dropna().mean(),
-                "category": pd.Series.nunique,
-                "target_gender": lambda x: x.mode().iloc[0] if not x.mode().empty else "unknown",
-                "target_age_group": lambda x: x.mode().iloc[0] if not x.mode().empty else "unknown",
-
-                # New features
-                "StockCode": pd.Series.nunique,
-                "Description": lambda x: x.value_counts().idxmax() if not x.empty else "unknown",
-                "Quantity": "sum",
-                "UnitPrice": "mean"
+                "TotalPrice": "sum"
             }).rename(columns={
                 "InvoiceDate": "Recency",
                 "InvoiceNo": "Frequency",
-                "TotalPrice": "Monetary",
-                "price_segment": "AvgPriceSegment",
-                "category": "CategoryCount",
-                "target_gender": "PreferredGender",
-                "target_age_group": "PreferredAgeGroup",
-                "StockCode": "UniqueProductCount",
-                "Description": "MostFrequentProduct",
-                "Quantity": "TotalUnitsPurchased",
-                "UnitPrice": "AvgUnitPrice"
+                "TotalPrice": "Monetary"
             })
-
-            # Add AvgBasketValue, AvgBasketSize, ActivitySpanDays
-            basket_stats = df.groupby("CustomerID").agg({
-                "InvoiceNo": "nunique",
-                "TotalPrice": "sum",
-                "Quantity": "sum",
-                "InvoiceDate": ["min", "max"]
-            })
-            basket_stats.columns = ["NumBaskets", "TotalPrice", "TotalQuantity", "FirstDate", "LastDate"]
-            basket_stats["AvgBasketValue"] = basket_stats["TotalPrice"] / basket_stats["NumBaskets"]
-            basket_stats["AvgBasketSize"] = basket_stats["TotalQuantity"] / basket_stats["NumBaskets"]
-            basket_stats["ActivitySpanDays"] = (basket_stats["LastDate"] - basket_stats["FirstDate"]).dt.days
-
-            basket_stats_final = basket_stats[["AvgBasketValue", "AvgBasketSize", "ActivitySpanDays"]]
-
-            rfm = rfm.merge(basket_stats_final, left_index=True, right_index=True)
-
-            # Filter outliers if defined
-            if hasattr(self, "filter_rfm_outliers"):
-                rfm = self.filter_rfm_outliers(rfm)
 
             rfm.reset_index(inplace=True)
             rfm.to_csv(output_path, index=False)
-            self.logger.info("RFM features calculated and saved to '%s' with %d customers", output_path, rfm.shape[0])
+            self.logger.info("RFM scores saved to %s", output_path)
 
         except Exception:
-            self.logger.error("Failed to calculate RFM features")
+            self.logger.error("Failed to generate RFM scores")
             self.logger.error(traceback.format_exc())
             raise
 
-    def prepare_customer_feature_vectors(self, rfm_path="data/rfm_scores.csv",
-                                         output_path="data/customer_features_ready.csv"):
+    def generate_spending_profile(self, output_path="data/spending_profile.csv"):
         try:
-            self.logger.info("Transforming RFM features into model-ready format...")
+            self.logger.info("Generating customer spending profile features...")
 
-            df_rfm = pd.read_csv(rfm_path)
-            expected_cols = [
-                "CustomerID", "Recency", "Frequency", "Monetary",
-                "CategoryCount", "AvgPriceSegment", "PreferredGender", "PreferredAgeGroup",
-                "UniqueProductCount", "MostFrequentProduct", "TotalUnitsPurchased",
-                "AvgUnitPrice", "AvgBasketValue", "AvgBasketSize", "ActivitySpanDays"
-            ]
-            missing_cols = [col for col in expected_cols if col not in df_rfm.columns]
-            if missing_cols:
-                raise ValueError(f"Missing expected columns in RFM CSV: {missing_cols}")
+            df = self.df.copy()
+            df["InvoiceDate"] = pd.to_datetime(df["InvoiceDate"])
+            df["TotalPrice"] = df["Quantity"] * df["UnitPrice"]
+            df["DayOfWeek"] = df["InvoiceDate"].dt.dayofweek
 
-            # Drop non-numeric or overly sparse fields if needed (e.g., MostFrequentProduct)
-            if "MostFrequentProduct" in df_rfm.columns:
-                df_rfm.drop(columns=["MostFrequentProduct"], inplace=True)
+            # Ana metrikler
+            profile = df.groupby("CustomerID").agg({
+                "InvoiceNo": "nunique",
+                "Quantity": "sum",
+                "TotalPrice": "sum",
+                "category": pd.Series.nunique,
+                "target_gender": lambda x: x.mode().iloc[0] if not x.mode().empty else "unknown",
+                "target_age_group": lambda x: x.mode().iloc[0] if not x.mode().empty else "unknown",
+                "DayOfWeek": lambda x: x.mode().iloc[0] if not x.mode().empty else -1
+            }).rename(columns={
+                "InvoiceNo": "TotalTransactions",
+                "Quantity": "TotalUnitsPurchased",
+                "TotalPrice": "TotalSpend",
+                "category": "CategoryCount",
+                "target_gender": "PreferredGender",
+                "target_age_group": "PreferredAgeGroup",
+                "DayOfWeek": "PreferredDayOfWeek"
+            })
 
-            df_encoded = pd.get_dummies(df_rfm, columns=["PreferredGender", "PreferredAgeGroup"])
-            df_encoded.to_csv(output_path, index=False)
-            self.logger.info("Customer feature vectors saved to '%s' with shape %s", output_path, df_encoded.shape)
+            # Sepet ve işlem ortalamaları
+            profile["AvgTransactionValue"] = profile["TotalSpend"] / profile["TotalTransactions"]
+            profile["AvgBasketSize"] = profile["TotalUnitsPurchased"] / profile["TotalTransactions"]
+
+            # İptal bilgileri
+            cancellation_df = df[df["Quantity"] < 0].groupby("CustomerID").agg({
+                "InvoiceNo": "nunique"
+            }).rename(columns={"InvoiceNo": "CancellationFrequency"})
+
+            profile = profile.merge(cancellation_df, on="CustomerID", how="left")
+            profile["CancellationFrequency"] = profile["CancellationFrequency"].fillna(0)
+            profile["CancellationRate"] = profile["CancellationFrequency"] / profile["TotalTransactions"]
+
+            # En çok ürün alınan kategori
+            most_purchased = df.groupby(["CustomerID", "category"])["Quantity"].sum()
+            most_purchased = most_purchased.reset_index()
+            most_purchased = most_purchased.loc[most_purchased.groupby("CustomerID")["Quantity"].idxmax()]
+            most_purchased = most_purchased[["CustomerID", "category"]].rename(
+                columns={"category": "MostPurchasedCategory"})
+
+            # En çok harcama yapılan kategori
+            most_spent = df.groupby(["CustomerID", "category"])["TotalPrice"].sum()
+            most_spent = most_spent.reset_index()
+            most_spent = most_spent.loc[most_spent.groupby("CustomerID")["TotalPrice"].idxmax()]
+            most_spent = most_spent[["CustomerID", "category"]].rename(columns={"category": "MostSpentCategory"})
+
+            # Birleştir
+            profile = profile.merge(most_purchased, on="CustomerID", how="left")
+            profile = profile.merge(most_spent, on="CustomerID", how="left")
+
+            # Gereksiz kolonları kaldır
+            profile.drop(columns=["TotalUnitsPurchased"], inplace=True)
+
+            profile.reset_index(drop=True, inplace=True)
+            profile.to_csv(output_path, index=False)
+            self.logger.info("Spending profile saved to '%s' with shape %s", output_path, profile.shape)
 
         except Exception:
-            self.logger.error("Failed to prepare customer feature vectors")
+            self.logger.error("Failed to generate spending profile")
             self.logger.error(traceback.format_exc())
             raise
 
-    def filter_rfm_outliers(self, rfm_df: pd.DataFrame) -> pd.DataFrame:
+    def combine_rfm_and_spending_profile(self,
+                                         rfm_path="data/rfm_scores.csv",
+                                         spending_path="data/spending_profile.csv",
+                                         output_path="data/combined_features.csv"):
         try:
-            self.logger.info("Filtering outliers from RFM data...")
+            self.logger.info("Combining RFM and Spending Profile features...")
 
-            numeric_cols = ["Recency", "Frequency", "Monetary"]
-            Q1 = rfm_df[numeric_cols].quantile(0.25)
-            Q3 = rfm_df[numeric_cols].quantile(0.75)
-            IQR = Q3 - Q1
+            # RFM ve spending profile dosyalarını yükle
+            rfm_df = pd.read_csv(rfm_path)
+            spending_df = pd.read_csv(spending_path)
 
-            condition = ~((rfm_df[numeric_cols] < (Q1 - 1.5 * IQR)) | (rfm_df[numeric_cols] > (Q3 + 1.5 * IQR))).any(axis=1)
-            filtered_rfm = rfm_df[condition]
+            # CustomerID üzerinden birleştir
+            combined_df = pd.merge(rfm_df, spending_df, on="CustomerID", how="inner")
 
-            self.logger.info("Filtered RFM shape: %s", filtered_rfm.shape)
-            return filtered_rfm
+            # One-hot encoding yerine label encoding tercih edilebilir; burada bırakıyoruz
+            combined_df.to_csv(output_path, index=False)
+
+            self.logger.info("Combined features saved to '%s' with shape %s", output_path, combined_df.shape)
 
         except Exception:
-            self.logger.error("Failed to filter RFM outliers")
+            self.logger.error("Failed to combine RFM and spending profile features")
             self.logger.error(traceback.format_exc())
             raise
+
+
 
 if __name__ == "__main__":
-    manager = EnrichmentManager("data/Online Retail.csv", "data/enriched_cache.csv")
+    manager = EnrichmentManager("../../data/Online Retail.csv", "data/enriched_cache.csv")
     manager.load_dataset()
     manager.load_cache()
-    # manager.enrich_all()
+    # # manager.enrich_all()
     manager.merge_and_save()
-    manager.calculate_rfm_features()
-    manager.prepare_customer_feature_vectors()
+    manager.generate_rfm()
+    manager.generate_spending_profile()
+    manager.combine_rfm_and_spending_profile()

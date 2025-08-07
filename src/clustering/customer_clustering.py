@@ -7,11 +7,12 @@ import seaborn as sns
 from sklearn.cluster import KMeans
 import plotly.express as px
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 
 
 class CustomerSegmenter:
-    def __init__(self, feature_path="data/customer_features_ready.csv", output_dir="data", log_dir="logs"):
+    def __init__(self, feature_path="data/combined_features.csv", output_dir="data", log_dir="logs"):
         os.makedirs(output_dir, exist_ok=True)
         os.makedirs(log_dir, exist_ok=True)
 
@@ -33,15 +34,45 @@ class CustomerSegmenter:
         self.customer_ids = None
         self.X_scaled = None
 
-    def load_features(self):
+    def load_and_preprocess_features(self):
         try:
             self.logger.info("Loading customer features from %s", self.feature_path)
-            self.df = pd.read_csv(self.feature_path)
-            self.customer_ids = self.df["CustomerID"]
-            X = self.df.drop("CustomerID", axis=1)
-            scaler = StandardScaler()
-            self.X_scaled = scaler.fit_transform(X)
-            self.logger.info("Customer features loaded and normalized. Shape: %s", X.shape)
+
+            # 1. CSV'den veri oku
+            df = pd.read_csv(self.feature_path)
+
+            # 2. Eksik verileri tamamen kaldır (CustomerID dahil)
+            df.dropna(inplace=True)
+            self.logger.info("Dropped rows with missing values. Remaining rows: %d", df.shape[0])
+
+            # 3. CustomerID'yi ayır
+            self.customer_ids = df["CustomerID"]
+            X = df.drop("CustomerID", axis=1)
+
+            # 4. Kategorik sütunları label encoding ile sayısal hale getir
+            for col in X.select_dtypes(include="object").columns:
+                le = LabelEncoder()
+                X[col] = le.fit_transform(X[col].astype(str))
+
+            # 5. Normalize et
+            scaler = MinMaxScaler()
+            X_scaled = scaler.fit_transform(X)
+
+            # 6. Outlier tespiti ve kaldırılması
+            model = IsolationForest(contamination=0.05, random_state=0)
+            preds = model.fit_predict(X_scaled)
+
+            X_clean = X_scaled[preds == 1]
+            self.customer_ids = self.customer_ids[preds == 1].reset_index(drop=True)
+
+            # 7. Final dataframe oluştur
+            self.df = pd.DataFrame(X_clean, columns=X.columns)
+            self.df.insert(0, "CustomerID", self.customer_ids)
+
+            self.X_scaled = X_clean
+            self.logger.info("Features loaded, encoded, normalized, and outliers removed. Final shape: %s",
+                             self.X_scaled.shape)
+
         except Exception as e:
             self.logger.error("Error loading or preprocessing features")
             self.logger.error(e)
@@ -87,6 +118,10 @@ class CustomerSegmenter:
     def segment_customers(self, n_clusters=5):
         try:
             self.logger.info("Clustering customers with KMeans (k=%d)...", n_clusters)
+
+            if self.df is None or self.X_scaled is None or self.customer_ids is None:
+                raise ValueError("Features not loaded. Please run load_and_preprocess_features() first.")
+
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init="auto")
             clusters = kmeans.fit_predict(self.X_scaled)
             self.df["Cluster"] = clusters
@@ -100,7 +135,7 @@ class CustomerSegmenter:
             self.logger.error(e)
             raise
 
-    def visualize_clusters(self, input_path="data/customer_segments.csv"):
+    def visualize_clusters_2d(self, input_path="data/customer_segments.csv"):
         try:
             self.logger.info("Visualizing customer clusters...")
             df = pd.read_csv(input_path)
@@ -150,9 +185,9 @@ class CustomerSegmenter:
 
 if __name__ == "__main__":
     segmenter = CustomerSegmenter()
-    segmenter.load_features()
-    segmenter.plot_correlation_matrix()
+    segmenter.load_and_preprocess_features()
     segmenter.plot_elbow()
-    segmenter.segment_customers(n_clusters=5)
-    segmenter.visualize_clusters()
-    segmenter.visualize_clusters_3d(input_path="data/customer_segments.csv")
+    segmenter.segment_customers(n_clusters=4)
+    segmenter.plot_correlation_matrix()
+    segmenter.visualize_clusters_2d()
+    segmenter.visualize_clusters_3d()

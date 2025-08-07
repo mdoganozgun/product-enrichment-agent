@@ -7,3 +7,5 @@ google-generativeai
 pandas
 matplotlib
 scikit-learn
+sentence-transformers
+pymilvus
