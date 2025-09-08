@@ -1,4 +1,4 @@
-# src/utils/recommendation_utils.py
+# src/util/recommendation_utils.py
 import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity

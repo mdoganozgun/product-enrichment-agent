@@ -1,4 +1,11 @@
+import numpy as np
 import pandas as pd
+import os
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+
+# EK: util'ten mevcut yardımcılar
+from utils import load_transactions, kmeans_cluster  # CSV okuma + dosya var mı kontrolü
 
 from embedding.product_embedder import ProductEmbedder
 from embedding.milvus_client import MilvusClient
@@ -22,101 +29,24 @@ class EmbeddingManager:
         # Initialize the Milvus client for database operations
         self.milvus = MilvusClient(milvus_host, milvus_port, collection_name)
 
-    # Clean product data using filtering rules
-    def clean_product_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        # Drop rows with missing 'Description' or 'CustomerID'
-        df = df.dropna(subset=["Description", "CustomerID"])
-
-        # Drop duplicate rows
-        df.drop_duplicates(inplace=True)
-
-        # Remove anomalous stock codes (e.g., those with 0 or 1 digits)
-        unique_stock_codes = df['StockCode'].unique()
-        anomalous = [code for code in unique_stock_codes if sum(c.isdigit() for c in str(code)) in (0, 1)]
-        df = df[~df['StockCode'].isin(anomalous)]
-
-        # Remove irrelevant service descriptions
-        df = df[~df['Description'].isin(["Next Day Carriage", "High Resolution Image"])]
-
-        # Convert descriptions to uppercase and remove zero-priced items
-        df['Description'] = df['Description'].str.upper()
-        df = df[df['UnitPrice'] > 0]
-
-        # Reset index
-        df.reset_index(drop=True, inplace=True)
-
+    def _read_embeddings_df(self) -> pd.DataFrame:
+        """Read the cached product embeddings pickle."""
+        if not os.path.exists(self.pkl_path):
+            raise FileNotFoundError(f"Embeddings cache not found at: {self.pkl_path}. Run generate_product_embeddings() first.")
+        df = pd.read_pickle(self.pkl_path)
+        if "StockCode" not in df.columns or "embedding" not in df.columns:
+            raise ValueError("Embeddings cache is missing required columns: 'StockCode' and/or 'embedding'.")
         return df
 
-    # Generate embeddings for products and save them to a pickle file
     def generate_product_embeddings(self):
-        import os
-        import logging
-        os.makedirs(os.path.dirname(self.pkl_path), exist_ok=True)
-        os.makedirs("../logs", exist_ok=True)
-        # Setup logging with timestamped log file handler for detailed logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(message)s",
-            handlers=[
-                logging.FileHandler("../logs/embedding.log"),
-                logging.StreamHandler()
-            ]
-        )
-        logger = logging.getLogger(__name__)
+        """
+        Orchestrator: load CSV and delegate embedding+cache to ProductEmbedder.
+        Note: any cleaning/prep is handled inside ProductEmbedder.
+        """
+        df = load_transactions(self.csv_path)
 
-        if os.path.exists(self.pkl_path):
-            existing_df = pd.read_pickle(self.pkl_path)
-            if "StockCode" not in existing_df.columns:
-                logger.warning("⚠️ 'StockCode' column missing in existing embeddings. Skipping resume logic.")
-                existing_df = pd.DataFrame()
-                embedded_ids = set()
-            else:
-                embedded_ids = set(existing_df["StockCode"].astype(str))
-                logger.info(f"🔁 Resuming from previous embedding with {len(embedded_ids)} products already embedded.")
-        else:
-            existing_df = pd.DataFrame()
-            embedded_ids = set()
-
-        logger.info("📥 Reading CSV and applying cleaning steps...")
-        df = pd.read_csv(self.csv_path)  # Load original product data
-        df = self.clean_product_dataframe(df)  # Apply cleaning steps
-        # Take only unique products by StockCode
-        df = df.drop_duplicates(subset=["StockCode"])
-        logger.info(f"📊 Total cleaned rows: {len(df)}")
-        before_dedup = len(df)
-        df = df[~df["StockCode"].astype(str).isin(embedded_ids)]
-        logger.info(f"🧹 Skipping already embedded products: {before_dedup - len(df)} skipped, {len(df)} remaining.")
-        logger.info(f"🧼 Data cleaned. Remaining rows: {len(df)}")
-
-        # Generate embedding text and embeddings
-        df["embedding_text"] = df.apply(self.embedder.create_embedding_text, axis=1)
-        logger.info("🧠 Generating embeddings...")
-        df = df.reset_index(drop=True)  # Ensure index is clean for safe at[] assignment
-        df["embedding"] = [None] * len(df)
-        from tqdm import tqdm
-        embeddings = []
-        for idx, row in tqdm(df.iterrows(), total=len(df), desc="🔄 Embedding products"):
-            product_id = row.get("StockCode", f"row-{idx}")
-            logger.info(f"Embedding product {idx + 1}/{len(df)} - StockCode: {product_id}")
-            text = row["embedding_text"]
-            embedding = self.embedder.model.encode(text)
-            embeddings.append(embedding)
-        df["embedding"] = embeddings
-        # df["embedding"] = df["embedding_text"].apply(lambda x: self.embedder.model.encode(x))
-
-        # Ensure 'StockCode' column exists before saving
-        if "StockCode" not in df.columns:
-            raise ValueError("❌ 'StockCode' column missing from input data. Cannot proceed.")
-
-        if not existing_df.empty:
-            df = pd.concat([existing_df, df], ignore_index=True).drop_duplicates(subset=["StockCode"])
-
-        # Save final DataFrame with all necessary columns
-        df.to_pickle(self.pkl_path)
-        logger.info(f"💾 Embeddings saved to: {self.pkl_path}")
-        logger.info(f"🔎 Columns in final DataFrame: {df.columns.tolist()}")
-        logger.info(f"✅ {len(df)} products embedded and saved to {self.pkl_path}")
-        logger.info(f"📦 Total cache size now: {len(df.drop_duplicates(subset=['StockCode']))}")
+        # Delegate the full operation to the embedder (to be implemented there).
+        return self.embedder.generate_and_cache_embeddings(df, self.pkl_path)
 
     # Search Milvus using embedded query text and return similar products
     def query_similar_products(self, query_text: str, top_k=5):
@@ -125,8 +55,11 @@ class EmbeddingManager:
 
     # Retrieve the embedding of a product from the saved pickle file
     def get_product_embedding(self, product_id):
-        df = pd.read_pickle(self.pkl_path)
-        return df.loc[df["StockCode"].astype(str) == str(product_id), "embedding"].values[0]
+        df = self._read_embeddings_df()
+        match = df.loc[df["StockCode"].astype(str) == str(product_id), "embedding"]
+        if match.empty:
+            raise ValueError(f"Product {product_id} not found in embeddings cache.")
+        return match.values[0]
 
 
     # Create Milvus collection (drops existing one)
@@ -136,20 +69,18 @@ class EmbeddingManager:
 
     # Insert embeddings from pickle into Milvus
     def insert_embeddings_to_milvus(self):
-        df = pd.read_pickle(self.pkl_path)
-        df["embedding"] = df["embedding"].apply(lambda x: x.tolist() if hasattr(x, "tolist") else x)
+        df = self._read_embeddings_df()
+        # ensure serializable lists
+        emb_col = df["embedding"].apply(lambda x: x.tolist() if hasattr(x, "tolist") else x)
         product_ids = df["StockCode"].astype(str).tolist()
-        embeddings = df["embedding"].tolist()
+        embeddings = emb_col.tolist()
         self.milvus.insert_embeddings(product_ids, embeddings)
         print("✅ Embeddings inserted into Milvus.")
 
-    # Create index on the embedding field in Milvus
+    # Create index on the embedding field in Milvus (no logging).
     def create_index(self):
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info("⚙️ Creating Milvus index on 'embedding' field...")
+        """Create index on the embedding field in Milvus."""
         self.milvus.create_index()
-        logger.info("✅ Milvus index created.")
 
     # Enrich raw Milvus search results with product descriptions
     def enrich_search_results(self, results):
@@ -162,7 +93,7 @@ class EmbeddingManager:
         Returns:
             List[Dict]: Each dict contains StockCode, Description, and similarity Score.
         """
-        df = pd.read_pickle(self.pkl_path)
+        df = self._read_embeddings_df()
         enriched = []
         for stockcode, score in results:
             row = df[df["StockCode"] == stockcode]
@@ -173,3 +104,132 @@ class EmbeddingManager:
                     "Score": score
                 })
         return enriched
+
+    def attach_behavioral_microsegments(
+            self,
+            reports_csv_path: str,
+            behavioral_embeddings_pkl: str,
+            out_csv_path: str | None = None,
+            k: int | None = None,
+            k_values: range | list[int] = range(2, 11),
+            rel_drop_threshold: float = 0.1,
+            return_metrics: bool = False,
+            label_col_in_embeddings: str | None = None,
+            plot: bool = True,
+    ) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
+        """
+        Behavioral mikro-segment etiketlerini finansal rapora feature olarak ekler.
+        - Eğer 'label_col_in_embeddings' verilmiş ve pkl içinde varsa, onu kullanır.
+        - Aksi halde pkl içindeki 'embedding' ile util.kmeans_cluster üzerinden etiket üretir.
+        - Sonucu rapora 'BehavioralCluster_...' kolonu olarak merge eder.
+        """
+        # 1) Dosyaları oku
+        if not os.path.exists(reports_csv_path):
+            raise FileNotFoundError(f"reports_csv_path not found: {reports_csv_path}")
+        if not os.path.exists(behavioral_embeddings_pkl):
+            raise FileNotFoundError(f"behavioral_embeddings_pkl not found: {behavioral_embeddings_pkl}")
+
+        df_rep = load_transactions(reports_csv_path)
+        if "CustomerID" not in df_rep.columns:
+            raise ValueError("reports_csv must contain 'CustomerID' column.")
+
+        df_beh = pd.read_pickle(behavioral_embeddings_pkl)
+        if "CustomerID" not in df_beh.columns:
+            raise ValueError("behavioral_embeddings_pkl must contain 'CustomerID' column.")
+
+        X_for_plot = None
+        # --- 2) Etiket kaynağı: ya hazır kolon ya da KMeans ile üret ---
+        scan = None
+        if label_col_in_embeddings and label_col_in_embeddings in df_beh.columns:
+            col_name = label_col_in_embeddings
+            labels = df_beh[col_name].astype(int).values
+            sil = float("nan")
+            if "embedding" in df_beh.columns:
+                X_for_plot = np.vstack([np.asarray(v) for v in df_beh["embedding"].tolist()])
+        else:
+            if "embedding" not in df_beh.columns:
+                raise ValueError("Embeddings file must contain an 'embedding' column when no label_col_in_embeddings is provided.")
+            # Build matrix
+            X = np.vstack([np.asarray(v) for v in df_beh["embedding"].tolist()])
+
+            if k is None:
+                k_grid = list(k_values) if isinstance(k_values, (list, range)) else list(k_values)
+                silhouettes = []
+                best_k = None
+                best_s = -np.inf
+
+                for k_try in k_grid:
+                    try:
+                        _, s = kmeans_cluster(X, int(k_try))
+                        silhouettes.append(float(s) if not np.isnan(s) else np.nan)
+                        if not np.isnan(s) and s > best_s:
+                            best_s = s
+                            best_k = int(k_try)
+                    except Exception:
+                        silhouettes.append(np.nan)
+                        continue
+
+                if best_k is None:
+                    raise ValueError("Could not fit KMeans for any k in k_values; all silhouettes are NaN/invalid.")
+                k = best_k
+                scan = {"k_grid": k_grid, "silhouettes": silhouettes}
+
+            labels, sil = kmeans_cluster(X, int(k))
+            X_for_plot = X
+            col_name = f"BehavioralCluster_KMeans_k{k}"
+
+        # --- Ensure we don't duplicate the SAME column name on repeated runs ---
+        # If the exact target column already exists in the report, drop it so merge writes a fresh one.
+        if col_name in df_rep.columns:
+            df_rep = df_rep.drop(columns=[col_name])
+
+        # 3) Müşteri-etiket tablosu
+        assign = pd.DataFrame({
+            "CustomerID": df_beh["CustomerID"].astype(str).values,
+            col_name: labels.astype(int)
+        })
+
+        # 4) Merge (rapordaki tüm müşteriler kalsın)
+        df_rep["CustomerID"] = df_rep["CustomerID"].astype(str)
+        df_out = df_rep.merge(assign, on="CustomerID", how="left")
+
+        # Fill missing labels with -1 and enforce int type
+        if col_name not in df_out.columns:
+            # Should not happen since we just merged that column from `assign`,
+            # but keep a safe fallback.
+            df_out[col_name] = -1
+        df_out[col_name] = df_out[col_name].fillna(-1).astype(int)
+
+        # Tipi netle
+        df_out[col_name] = df_out[col_name].astype(int)
+
+        # --- Optional: plot KMeans result in 2D via PCA ---
+        if plot and X_for_plot is not None:
+            try:
+                pca = PCA(n_components=2, random_state=42)
+                Z = pca.fit_transform(X_for_plot)
+                plt.figure(figsize=(8, 6))
+                for lab in sorted(np.unique(labels)):
+                    mask = (labels == lab)
+                    plt.scatter(Z[mask, 0], Z[mask, 1], s=25, alpha=0.8, label=f"Cluster {lab}")
+                plt.title(f"KMeans (k={int(k)}), silhouette={float(sil):.3f}")
+                plt.xlabel("PCA 1")
+                plt.ylabel("PCA 2")
+                plt.grid(True, alpha=0.3)
+                plt.legend()
+                plt.tight_layout()
+                plt.show()
+            except Exception:
+                # Silently ignore plotting errors to keep the pipeline robust
+                pass
+
+        # 5) Kaydet
+        if out_csv_path is None:
+            out_csv_path = reports_csv_path  # üzerine yaz
+        os.makedirs(os.path.dirname(os.path.abspath(out_csv_path)), exist_ok=True)
+        df_out.to_csv(out_csv_path, index=False)
+
+        if return_metrics:
+            return df_out, {"k": int(k), "silhouette": float(sil), "scan": scan, "label_col": col_name}
+        else:
+            return df_out
